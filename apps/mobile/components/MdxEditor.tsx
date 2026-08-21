@@ -2,9 +2,12 @@ import { useMemo } from 'react';
 import { StyleSheet, View } from 'react-native';
 import CodeMirror, { EditorView, type ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { markdown } from '@codemirror/lang-markdown';
+import { keymap } from '@codemirror/view';
+import { Prec } from '@codemirror/state';
 
 import { createLivePreviewExtension } from '../lib/mdxLivePreview';
 import { createOccurrenceAutocomplete } from '../lib/occurrenceAutocomplete';
+import type { FormattingResult, Selection } from '../lib/mdxFormatting';
 import type { Theme } from '../theme';
 
 // Piles de police web-safe pour Paramètres → Éditeur → Police d'écriture.
@@ -54,6 +57,14 @@ type Props = {
   fontSize?: number;
   fontFamily?: EditorFontFamily;
   closeBrackets?: boolean;
+  // Raccourcis clavier de la barre de formatage (voir
+  // lib/notesToolbarActions.ts, NOTES_TOOLBAR_ACTIONS[].shortcut) — même
+  // fonction `run` que le clic sur le bouton correspondant, exécutée ici
+  // directement sur l'EditorView plutôt que via NotesScreen.applyFormatting
+  // (MdxEditor est le seul à détenir la vraie instance CodeMirror avant que
+  // `onReady` ne la remonte). Optionnel : sans cette prop, seuls les
+  // raccourcis par défaut de CodeMirror s'appliquent, comme avant.
+  shortcuts?: { key: string; run: (text: string, selection: Selection) => FormattingResult }[];
 };
 
 export function MdxEditor({
@@ -69,6 +80,7 @@ export function MdxEditor({
   fontSize = 15,
   fontFamily = 'system',
   closeBrackets = true,
+  shortcuts,
 }: Props) {
   const editorTheme = useMemo(
     () =>
@@ -117,10 +129,37 @@ export function MdxEditor({
     [occurrenceWords, onCreateOccurrence],
   );
 
+  // `Prec.highest` : garantit que ces raccourcis gagnent sur les bindings
+  // par défaut de `basicSetup` (ex. historyKeymap) plutôt que de dépendre de
+  // l'ordre d'enregistrement des extensions, qui n'est pas garanti stable.
+  // La transaction dispatchée est strictement identique à celle
+  // d'applyFormatting (NotesScreen.tsx) — même geste, juste déclenché au
+  // clavier plutôt qu'au clic.
+  const shortcutsExtension = useMemo(() => {
+    if (!shortcuts || shortcuts.length === 0) return null;
+    return Prec.highest(
+      keymap.of(
+        shortcuts.map(({ key, run }) => ({
+          key,
+          run: (view: EditorView) => {
+            const sel = view.state.selection.main;
+            const result = run(view.state.doc.toString(), { start: sel.from, end: sel.to });
+            view.dispatch({
+              changes: { from: 0, to: view.state.doc.length, insert: result.text },
+              selection: { anchor: result.selection.start, head: result.selection.end },
+            });
+            return true;
+          },
+        })),
+      ),
+    );
+  }, [shortcuts]);
+
   const extensions = useMemo(() => {
     const base = [markdown(), EditorView.lineWrapping, occurrenceAutocomplete];
-    return livePreview ? [...base, liveExtension] : base;
-  }, [livePreview, liveExtension, occurrenceAutocomplete]);
+    const withShortcuts = shortcutsExtension ? [...base, shortcutsExtension] : base;
+    return livePreview ? [...withShortcuts, liveExtension] : withShortcuts;
+  }, [livePreview, liveExtension, occurrenceAutocomplete, shortcutsExtension]);
 
   return (
     <View style={styles.container}>

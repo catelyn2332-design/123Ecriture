@@ -65,6 +65,10 @@ export const DEFAULT_PREFERENCES: Preferences = {
     explorer: { width: 260, collapsed: false },
     rightPanel: { width: 280, collapsed: false },
   },
+  favoriteRelPaths: [],
+  // Sync manuelle par défaut — choix déjà tranché (voir CLAUDE.md), ne
+  // JAMAIS passer à `true` ici.
+  autoSyncEnabled: false,
 };
 
 // Les 3 listes `*ToolbarOrder` (Notes/Canvas/Graphiques) ont besoin d'une

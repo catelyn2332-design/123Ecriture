@@ -13,27 +13,35 @@ type Props = {
   theme: Theme;
   onSelect: (destinationRelPath?: string) => void;
   onCancel: () => void;
+  // Mode multi-sélection (voir NotesScreen.tsx, barre d'actions groupées
+  // "Déplacer…") : pas de nœud UNIQUE à exclure des destinations ni de
+  // "dossier déjà là" à désactiver — chaque élément sélectionné peut avoir
+  // un parent différent. `multiCount` (nombre d'éléments) pilote juste le
+  // titre et le fait de rester monté sans `node`.
+  multiCount?: number;
 };
 
-export function MoveDialog({ node, tree, theme, onSelect, onCancel }: Props) {
-  if (!node) return null;
-  const options = collectFolderOptions(tree, node.type === 'folder' ? node.relPath : undefined);
-  const currentParent = node.relPath.includes('/')
-    ? node.relPath.slice(0, node.relPath.lastIndexOf('/'))
-    : undefined;
+export function MoveDialog({ node, tree, theme, onSelect, onCancel, multiCount }: Props) {
+  if (!node && !multiCount) return null;
+  const options = collectFolderOptions(tree, node?.type === 'folder' ? node.relPath : undefined);
+  // En mode multi-sélection (`node` absent), aucune destination n'est
+  // présumée "déjà là" : contrairement au mode simple, on ne connaît pas de
+  // parent unique à exclure.
+  const currentParent =
+    node && node.relPath.includes('/') ? node.relPath.slice(0, node.relPath.lastIndexOf('/')) : undefined;
+  const rootDisabled = node ? currentParent === undefined : false;
+  const title = node ? `Déplacer « ${node.name} » vers…` : `Déplacer ${multiCount} éléments vers…`;
 
   return (
     <Modal visible transparent animationType="fade" onRequestClose={onCancel}>
       <Pressable style={styles.backdrop} onPress={onCancel}>
         <Pressable style={[styles.dialog, { backgroundColor: theme.surface }]} onPress={(e) => e.stopPropagation()}>
-          <Text style={[styles.title, { color: theme.text }]}>
-            Déplacer « {node.name} » vers…
-          </Text>
+          <Text style={[styles.title, { color: theme.text }]}>{title}</Text>
           <ScrollView style={styles.optionsList}>
             <Pressable
               onPress={() => onSelect(undefined)}
-              disabled={currentParent === undefined}
-              style={[styles.option, currentParent === undefined && styles.optionDisabled]}
+              disabled={rootDisabled}
+              style={[styles.option, rootDisabled && styles.optionDisabled]}
             >
               <Text style={{ color: theme.text }}>🗄️ Racine du vault</Text>
             </Pressable>

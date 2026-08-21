@@ -15,9 +15,11 @@ import { settingsStyles as s } from './settingsStyles';
 // soit LE endroit où configurer les propriétés (voir demande utilisateur :
 // dépasser Obsidian sur ce point précis), le panneau latéral et le bloc en
 // haut de note (PropertiesBlock.tsx) ne font plus qu'éditer des valeurs.
-// Renommer/changer le type/supprimer une définition ne touche jamais les
-// valeurs déjà écrites dans les notes (voir le commentaire d'en-tête
-// d'apps/desktop/electron/properties.ts) — juste ce registre.
+// Renommer une définition migre la CLÉ de frontmatter dans les notes qui la
+// portent déjà (voir migrateRenamedPropertyInVault, apps/desktop/electron/
+// properties.ts) ; changer le type ou supprimer une définition, en
+// revanche, ne touche jamais les valeurs déjà écrites — juste ce registre
+// (voir le commentaire d'en-tête d'apps/desktop/electron/properties.ts).
 function TypePicker({
   value,
   onSelect,
@@ -66,6 +68,23 @@ function TypePicker({
   );
 }
 
+// Résumé de migration → message lisible, jamais un simple "OK" (voir
+// usePropertyDefinitions.update et le commentaire d'en-tête de
+// electron/properties.ts). `migratedCount === 0 && skippedCount === 0`
+// (propriété pas encore utilisée dans aucune note) reste affiché tel quel —
+// "0 note(s) mise(s) à jour" est une information honnête, pas un bruit à
+// masquer.
+function formatMigrationMessage(migration: PropertyRenameMigrationSummary): string {
+  const parts = [`${migration.migratedCount} note(s) mise(s) à jour`];
+  if (migration.skippedCount > 0) {
+    parts.push(`${migration.skippedCount} ignorée(s) — la nouvelle clé existait déjà`);
+  }
+  if (migration.errorCount > 0) {
+    parts.push(`${migration.errorCount} erreur(s)`);
+  }
+  return parts.join(' · ');
+}
+
 export function PropertiesManagementSection() {
   const { theme } = usePreferences();
   const { bridge, definitions, error, create, update, remove } = usePropertyDefinitions();
@@ -75,6 +94,18 @@ export function PropertiesManagementSection() {
   // TypePicker plus haut. `'new'` désigne celui de la ligne de création tout
   // en bas, les autres valeurs sont des `PropertyDefinition.id`.
   const [openTypePickerId, setOpenTypePickerId] = useState<string | null>(null);
+  // Résumé de la dernière migration de frontmatter suite à un renommage —
+  // partagé entre toutes les lignes (comme `error` ci-dessus) plutôt qu'un
+  // état par propriété : un seul renommage à la fois a du sens ici.
+  const [migrationMessage, setMigrationMessage] = useState<string | null>(null);
+
+  const renameProperty = (id: string, trimmedName: string) => {
+    setMigrationMessage(null);
+    void (async () => {
+      const migration = await update(id, { name: trimmedName });
+      if (migration) setMigrationMessage(formatMigrationMessage(migration));
+    })();
+  };
 
   const submitCreate = () => {
     const name = newName.trim();
@@ -98,9 +129,13 @@ export function PropertiesManagementSection() {
         <Text style={[s.cardTitle, { color: theme.text }]}>🏷️ Gestion des propriétés</Text>
         <Text style={[s.label, { color: theme.textMuted }]}>
           Le schéma défini ici est proposé partout où une note peut avoir des propriétés (barre latérale, bloc en
-          haut de note). Renommer ou changer le type d’une propriété ne modifie jamais les notes déjà écrites.
+          haut de note). Renommer une propriété migre automatiquement les notes qui l’utilisaient déjà ; changer
+          son type ne modifie jamais les notes déjà écrites.
         </Text>
         {error && <Text style={styles.error}>⚠️ {error}</Text>}
+        {migrationMessage && (
+          <Text style={[styles.migrationMessage, { color: theme.textMuted }]}>✅ {migrationMessage}</Text>
+        )}
 
         {definitions.length === 0 && (
           <Text style={[styles.muted, { color: theme.textMuted }]}>Aucune propriété définie pour l’instant.</Text>
@@ -113,7 +148,7 @@ export function PropertiesManagementSection() {
                 initialValue={def.name}
                 onCommit={(value) => {
                   const trimmed = value.trim();
-                  if (trimmed) void update(def.id, { name: trimmed });
+                  if (trimmed && trimmed !== def.name) renameProperty(def.id, trimmed);
                 }}
                 theme={theme}
                 style={[styles.defNameInput, { color: theme.text, borderColor: theme.border }]}
@@ -188,6 +223,9 @@ const styles = StyleSheet.create({
   },
   error: {
     color: '#dc2626',
+    fontSize: 12,
+  },
+  migrationMessage: {
     fontSize: 12,
   },
   defBlock: {

@@ -42,8 +42,10 @@ export const DraggablePressable = Pressable as unknown as ComponentType<
 
 // Icône par `kind` de fichier (voir EXTENSION_TO_KIND dans
 // apps/desktop/electron/vault.js) — distingue une note MDX d'un canvas ou
-// d'un graphique dans l'arborescence.
-const NOTE_ICON_BY_KIND: Record<VaultEntryKind, string> = {
+// d'un graphique dans l'arborescence. Exportée : réutilisée telle quelle par
+// NotesScreen.tsx pour la section "⭐ Favoris" (mêmes icônes, pas de rendu
+// dupliqué à maintenir en double).
+export const NOTE_ICON_BY_KIND: Record<VaultEntryKind, string> = {
   markdown: '📝',
   canvas: '🎨',
   chart: '📊',
@@ -65,8 +67,20 @@ type Props = {
   activeRelPath?: string;
   collapsedPaths: Set<string>;
   onToggleCollapse: (relPath: string) => void;
-  onOpenNote: (node: VaultNoteNode) => void;
+  // Reçoit aussi les touches de modification (Ctrl/Cmd/Shift) du clic —
+  // voir NotesScreen.tsx, `handleRowPress` : Ctrl/Cmd bascule la ligne dans
+  // la multi-sélection SANS ouvrir la note, Shift étend la sélection depuis
+  // le dernier élément cliqué, un clic simple ouvre normalement. Lu depuis
+  // `event.nativeEvent` — sur web, la vraie MouseEvent du clic (voir
+  // PressResponder.onClick de react-native-web, qui le documente comme
+  // volontairement "pas un TouchEvent" contrairement au reste du système de
+  // responder).
+  onOpenNote: (node: VaultNoteNode, modifiers: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) => void;
   rename: RenameState | null;
+  // Lignes actuellement en multi-sélection (voir NotesScreen.tsx) — teintée
+  // comme les autres états de l'arbre (glisser, cible de dépôt), `Set`
+  // plutôt que tableau pour un test d'appartenance en O(1) à chaque ligne.
+  selectedRelPaths?: Set<string>;
   // Glisser pour RÉORDONNER (voir NotesScreen.tsx, qui délègue les
   // évènements DOM dragstart/dragover/drop sur le conteneur plutôt que par
   // ligne — même raison que le clic droit délégué : passer onDragStart/
@@ -107,6 +121,7 @@ export function VaultTreeView({
   onToggleCollapse,
   onOpenNote,
   rename,
+  selectedRelPaths,
   draggingRelPath,
   dragOverInsertion,
   dragEnabled = true,
@@ -120,6 +135,7 @@ export function VaultTreeView({
         const isDragging = draggingRelPath === node.relPath;
         const insertionEdge = dragOverInsertion?.relPath === node.relPath ? dragOverInsertion.edge : null;
         const isDropInsideTarget = insertionEdge === 'inside';
+        const isSelected = !isFolder && (selectedRelPaths?.has(node.relPath) ?? false);
 
         return (
           <Fragment key={node.relPath}>
@@ -129,7 +145,26 @@ export function VaultTreeView({
               </View>
             )}
             <DraggablePressable
-              onPress={() => (isFolder ? onToggleCollapse(node.relPath) : onOpenNote(node))}
+              onPress={(event) => {
+                if (isFolder) {
+                  onToggleCollapse(node.relPath);
+                  return;
+                }
+                // `nativeEvent` est ici la vraie MouseEvent du clic (voir le
+                // commentaire de la prop `onOpenNote` ci-dessus) — cast
+                // explicite plutôt qu'un `as any` épars, même échappatoire
+                // de typage que `DraggablePressable` en haut de ce fichier.
+                const native = event.nativeEvent as unknown as {
+                  ctrlKey?: boolean;
+                  metaKey?: boolean;
+                  shiftKey?: boolean;
+                };
+                onOpenNote(node, {
+                  ctrlKey: native.ctrlKey === true,
+                  metaKey: native.metaKey === true,
+                  shiftKey: native.shiftKey === true,
+                });
+              }}
               dataSet={{ relpath: node.relPath }}
               style={[
                 styles.row,
@@ -138,6 +173,7 @@ export function VaultTreeView({
                 !isRenaming && dragEnabled && styles.rowDraggable,
                 isDragging && styles.rowDragging,
                 isDropInsideTarget && { backgroundColor: `${theme.accent}33`, borderRadius: 6 },
+                isSelected && { backgroundColor: `${theme.accent}33` },
               ]}
             >
               {/* Lignes de profondeur — une par ancêtre, pour se repérer
@@ -190,6 +226,7 @@ export function VaultTreeView({
                 onToggleCollapse={onToggleCollapse}
                 onOpenNote={onOpenNote}
                 rename={rename}
+                selectedRelPaths={selectedRelPaths}
                 draggingRelPath={draggingRelPath}
                 dragOverInsertion={dragOverInsertion}
                 dragEnabled={dragEnabled}

@@ -12,9 +12,13 @@ type Props = {
   descriptions: Record<string, string>;
   onChange: (next: ToolbarItemConfig[]) => void;
   theme: Theme;
+  // Raccourci clavier affiché à côté du libellé, ex. "Ctrl+B" (voir
+  // lib/notesToolbarActions.ts, NOTES_TOOLBAR_SHORTCUT_LABELS) — seule la
+  // barre Notes en a pour l'instant, absent sinon.
+  shortcuts?: Partial<Record<string, string>>;
 };
 
-export function ToolbarOrderEditor({ items, descriptions, onChange, theme }: Props) {
+export function ToolbarOrderEditor({ items, descriptions, onChange, theme, shortcuts }: Props) {
   const moveItem = (index: number, direction: -1 | 1) => {
     const target = index + direction;
     if (target < 0 || target >= items.length) return;
@@ -42,7 +46,12 @@ export function ToolbarOrderEditor({ items, descriptions, onChange, theme }: Pro
           >
             {item.visible && <Text style={s.checkboxMark}>✓</Text>}
           </Pressable>
-          <Text style={[s.toolbarItemLabel, { color: theme.text }]}>{descriptions[item.id] ?? item.id}</Text>
+          <Text style={[s.toolbarItemLabel, { color: theme.text }]}>
+            {descriptions[item.id] ?? item.id}
+            {shortcuts?.[item.id] ? (
+              <Text style={{ color: theme.textMuted, fontSize: 12 }}> · {shortcuts[item.id]}</Text>
+            ) : null}
+          </Text>
           <View style={s.reorderButtons}>
             <Pressable
               onPress={() => moveItem(index, -1)}

@@ -2,9 +2,11 @@ import { useCallback, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { useAuth } from '../../lib/sync/AuthContext';
-import { linkVaultToCloud, runSync, type SyncSummary } from '../../lib/sync/syncEngine';
+import { useSyncStatus } from '../../lib/sync/SyncStatusContext';
+import { linkVaultToCloud, runSync as runSyncEngine, type SyncSummary } from '../../lib/sync/syncEngine';
 import { useVaults } from '../../lib/sync/VaultsContext';
 import { usePreferences } from '../../preferences/PreferencesContext';
+import { SettingsToggle } from './SettingsToggle';
 import { settingsStyles as s } from './settingsStyles';
 
 // Section "Compte et synchronisation" — Compte (Google/Supabase) et Coffres
@@ -14,7 +16,7 @@ import { settingsStyles as s } from './settingsStyles';
 // web/mobile, la section explique pourquoi elle est vide plutôt que de
 // disparaître silencieusement.
 export function AccountSyncSection() {
-  const { theme } = usePreferences();
+  const { theme, preferences, setAutoSyncEnabled } = usePreferences();
   const auth = useAuth();
   const {
     vaults: vaultList,
@@ -27,6 +29,12 @@ export function AccountSyncSection() {
     setCloudLink,
   } = useVaults();
   const vault = typeof window !== 'undefined' ? window.vault : undefined;
+  // Statut partagé (voir SyncStatusContext.tsx) — source de vérité pour le
+  // coffre ACTIF, la même que l'indicateur global de AppShell.tsx. Les
+  // autres coffres liés (non actifs) gardent leur propre state local
+  // ci-dessous : le contexte ne suit que "le" coffre courant, comme
+  // l'indicateur global qui n'a de sens que pour un seul coffre à la fois.
+  const syncStatus = useSyncStatus();
 
   const [vaultActionError, setVaultActionError] = useState<string | null>(null);
   const [renamingVaultId, setRenamingVaultId] = useState<string | null>(null);
@@ -88,10 +96,20 @@ export function AccountSyncSection() {
   const handleSyncVault = useCallback(
     async (v: VaultRegistryEntry) => {
       if (!auth.user || !v.remoteVaultId) return;
+      // Le coffre ACTIF partage son état avec l'indicateur global (voir
+      // SyncStatusContext.tsx / AppShell.tsx) — on délègue à son runSync()
+      // plutôt que de dupliquer l'appel à syncEngine ici, pour que les deux
+      // affichages restent cohérents. Les coffres non actifs (rares :
+      // syncable depuis Paramètres sans y être "dans"), eux, gardent
+      // l'appel direct au moteur avec leur propre state local, comme avant.
+      if (v.id === activeVaultId) {
+        await syncStatus.runSync();
+        return;
+      }
       setSyncingVaultId(v.id);
       setSyncResults((prev) => ({ ...prev, [v.id]: {} }));
       try {
-        const summary = await runSync(v.remoteVaultId, auth.user.id);
+        const summary = await runSyncEngine(v.remoteVaultId, auth.user.id);
         setSyncResults((prev) => ({ ...prev, [v.id]: { summary } }));
       } catch (error) {
         console.error('[sync] échec de la synchronisation :', error);
@@ -103,7 +121,7 @@ export function AccountSyncSection() {
         setSyncingVaultId(null);
       }
     },
-    [auth.user],
+    [auth.user, activeVaultId, syncStatus],
   );
 
   if (!auth.available && !vault) {
@@ -195,8 +213,14 @@ export function AccountSyncSection() {
 
           {auth.user &&
             vaultList.map((v) => {
-              const isSyncing = syncingVaultId === v.id;
-              const result = syncResults[v.id];
+              const isActiveVault = v.id === activeVaultId;
+              const isSyncing = isActiveVault ? syncStatus.status === 'syncing' : syncingVaultId === v.id;
+              // Coffre actif : lit le résultat depuis le contexte partagé
+              // (même source que l'indicateur global) plutôt que du state
+              // local `syncResults`, qui ne sert plus qu'aux autres coffres.
+              const result: { summary?: SyncSummary; error?: string } = isActiveVault
+                ? { summary: syncStatus.lastSummary ?? undefined, error: syncStatus.lastError ?? undefined }
+                : (syncResults[v.id] ?? {});
               return (
                 <View key={`sync-${v.id}`} style={styles.syncRow}>
                   <Text style={[styles.vaultPathText, { color: theme.textMuted }]} numberOfLines={1}>
@@ -232,6 +256,26 @@ export function AccountSyncSection() {
                 </View>
               );
             })}
+
+          {/* Synchro automatique — voir SyncStatusContext.tsx pour le
+              déclenchement réel (démarrage + intervalle). Visible dès qu'un
+              compte est connecté, même sans coffre lié pour l'instant :
+              c'est une préférence globale, pas propre à un coffre — elle
+              s'appliquera dès qu'un coffre sera lié. */}
+          {auth.user && (
+            <View style={styles.autoSyncBlock}>
+              <SettingsToggle
+                label="Synchroniser automatiquement"
+                value={preferences.autoSyncEnabled}
+                onChange={(value) => void setAutoSyncEnabled(value)}
+                theme={theme}
+              />
+              <Text style={[styles.autoSyncHint, { color: theme.textMuted }]}>
+                Synchronise le coffre actif automatiquement au lancement de l’app et toutes les 15 minutes, en plus
+                de « Synchroniser maintenant ».
+              </Text>
+            </View>
+          )}
 
           {vaultActionError && <Text style={s.error}>⚠️ {vaultActionError}</Text>}
 
@@ -323,5 +367,13 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     minWidth: 100,
     alignItems: 'center',
+  },
+  autoSyncBlock: {
+    gap: 2,
+    paddingTop: 4,
+  },
+  autoSyncHint: {
+    fontSize: 11,
+    marginLeft: 30,
   },
 });

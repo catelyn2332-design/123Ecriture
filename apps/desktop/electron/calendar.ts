@@ -24,7 +24,10 @@ function getEventsFilePath(vaultPath: string): string {
   return path.join(vaultPath, '.123ecriture', 'events.json');
 }
 
-function readEvents(vaultPath: string): CalendarEvent[] {
+// Exportée pour search.ts — la recherche globale doit aussi trouver les
+// évènements du calendrier, même raison que readTasks/getTaskLists dans
+// tasks.ts (même process Electron, pas de duplication de lecture).
+export function readEvents(vaultPath: string): CalendarEvent[] {
   try {
     return JSON.parse(fsSync.readFileSync(getEventsFilePath(vaultPath), 'utf8')) as CalendarEvent[];
   } catch {

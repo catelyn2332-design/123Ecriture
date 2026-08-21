@@ -4,6 +4,8 @@
 // //1. Recherche — findNodeByPath, getParentRelPath, getAncestorRelPaths.
 // //2. Listes dérivées — flattenNotes, getChildrenAt.
 // //3. Dossiers destination — collectFolderOptions (voir MoveDialog.tsx).
+// //4. Chemins (fichiers + dossiers) — collectPathOptions.
+// //5. Multi-sélection — flattenVisibleNotes (voir NotesScreen.tsx).
 
 // //1. 🔎 RECHERCHE
 // ////////////////////////////////////////////////////////////////////////
@@ -122,4 +124,27 @@ export function collectPathOptions(nodes: VaultTreeNode[], depth = 0, options: P
     }
   }
   return options;
+}
+
+// //5. 🖱️ MULTI-SÉLECTION
+// ////////////////////////////////////////////////////////////////////////
+
+// Liste plate des NOTES actuellement VISIBLES dans l'explorateur, dans
+// l'ordre d'affichage réel (comme walkTree côté main process : dossiers
+// d'abord puis notes, à chaque niveau) — les descendants d'un dossier
+// REPLIÉ sont exclus. Utilisé par le Shift+clic de la multi-sélection (voir
+// NotesScreen.tsx, `handleRowPress`) pour étendre la sélection entre le
+// dernier élément cliqué et la ligne cliquée : l'étendue doit suivre ce que
+// l'utilisatrice VOIT à l'écran, pas l'ordre "brut" de l'arbre en mémoire
+// (qui contient aussi les enfants, invisibles, d'un dossier replié).
+export function flattenVisibleNotes(nodes: VaultTreeNode[], collapsedPaths: Set<string>): VaultNoteNode[] {
+  const notes: VaultNoteNode[] = [];
+  for (const node of nodes) {
+    if (node.type === 'note') {
+      notes.push(node);
+    } else if (!collapsedPaths.has(node.relPath)) {
+      notes.push(...flattenVisibleNotes(node.children, collapsedPaths));
+    }
+  }
+  return notes;
 }

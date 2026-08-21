@@ -53,6 +53,12 @@ declare global {
     reorder: (parentRelPath: string | undefined, orderedNames: string[]) => Promise<VaultTreeNode[]>;
     importAttachment: () => Promise<{ relPath: string; name: string } | null>;
     readAttachmentDataUrl: (relPath: string) => Promise<string>;
+    // Voir "Dupliquer" dans le menu contextuel de NotesScreen.tsx — copie
+    // dans le MÊME dossier, suffixée " (copie)"/" (copie 2)"...
+    duplicate: (relPath: string) => Promise<VaultEntry>;
+    // Voir la bascule Fichiers/Tags de NotesScreen.tsx — chargé à la
+    // demande (pas de flux poussé), voir apps/desktop/electron/search.ts.
+    listTags: () => Promise<TagGroup[]>;
   }
 
   interface VaultRegistryEntry {
@@ -141,10 +147,34 @@ declare global {
     options?: string[];
   }
 
+  // Résumé honnête de la migration du frontmatter des notes déclenchée par
+  // un RENOMMAGE de propriété (voir apps/desktop/electron/properties.ts,
+  // `migrateRenamedPropertyInVault`) — jamais un simple "OK" qui masquerait
+  // des notes non migrées.
+  interface PropertyRenameMigrationSummary {
+    // Notes dont la clé de frontmatter a été renommée et réécrites sur
+    // disque.
+    migratedCount: number;
+    // Notes qui avaient l'ancienne clé MAIS où la nouvelle portait déjà une
+    // valeur — jamais écrasée, donc jamais touchées.
+    skippedCount: number;
+    // Notes où la lecture/écriture a échoué — migration interrompue pour
+    // CETTE note seulement, jamais pour tout le coffre.
+    errorCount: number;
+  }
+
+  // `migration` n'est présent que si CET appel a effectivement renommé la
+  // propriété (patch.name différent du nom existant) ; un simple changement
+  // de type/d'options n'a rien à migrer côté notes.
+  interface PropertyUpdateResult {
+    properties: PropertyDefinition[];
+    migration?: PropertyRenameMigrationSummary;
+  }
+
   interface PropertiesBridge {
     list: () => Promise<PropertyDefinition[]>;
     create: (name: string, type: PropertyType, options?: string[]) => Promise<PropertyDefinition[]>;
-    update: (id: string, patch: PropertyPatch) => Promise<PropertyDefinition[]>;
+    update: (id: string, patch: PropertyPatch) => Promise<PropertyUpdateResult>;
     remove: (id: string) => Promise<PropertyDefinition[]>;
   }
 
@@ -173,10 +203,14 @@ declare global {
     findNotes: (word: string) => Promise<string[]>;
   }
 
-  // Recherche globale (voir SearchDialog.tsx, apps/desktop/electron/
-  // search.ts) — un résultat peut être un dossier ou une pièce jointe,
-  // aucun VaultEntryKind ne les couvre, d'où ce type élargi.
-  type SearchResultKind = VaultEntryKind | 'folder' | 'attachment';
+  // Recherche globale (voir SearchDialog.tsx, CommandPalette.tsx,
+  // apps/desktop/electron/search.ts) — un résultat peut être un dossier ou
+  // une pièce jointe, aucun VaultEntryKind ne les couvre, d'où ce type
+  // élargi. 'task'/'calendar-event' étendent la recherche aux modules
+  // Tâches/Calendrier — ni l'un ni l'autre n'a de fichier associé, d'où
+  // `relPath` vide ('') pour ces deux kinds (voir lib/searchResults.ts pour
+  // la logique d'ouverture partagée).
+  type SearchResultKind = VaultEntryKind | 'folder' | 'attachment' | 'task' | 'calendar-event';
   type SearchMatchType = 'title' | 'content' | 'tag' | 'property';
 
   interface SearchResult {
@@ -185,6 +219,15 @@ declare global {
     kind: SearchResultKind;
     matchType: SearchMatchType;
     snippet?: string;
+    // Uniquement kind==='task' — une tâche n'existe que dans le contexte de
+    // sa LISTE (voir TaskListsBridge.switch), les deux identifiants sont
+    // donc nécessaires pour la rouvrir.
+    taskId?: string;
+    taskListId?: string;
+    // Uniquement kind==='calendar-event' — `eventDate` (AAAA-MM-JJ) suffit à
+    // révéler le bon jour dans le Calendrier (CalendarScreen.tsx, openDay).
+    eventId?: string;
+    eventDate?: string;
   }
 
   interface SearchOptions {
@@ -194,6 +237,20 @@ declare global {
 
   interface SearchBridge {
     run: (query: string, options?: SearchOptions) => Promise<SearchResult[]>;
+  }
+
+  // Vue dédiée aux tags (voir NotesScreen.tsx, bascule Fichiers/Tags à côté
+  // du bouton de tri ⇅) — un `#mot-clé` peut apparaître dans plusieurs
+  // notes, d'où ce regroupement (voir VaultBridge.listTags,
+  // apps/desktop/electron/search.ts).
+  interface TagNoteRef {
+    relPath: string;
+    name: string;
+  }
+
+  interface TagGroup {
+    tag: string;
+    notes: TagNoteRef[];
   }
 
   // Contenu d'un fichier `.chart` (voir defaultContentForKind dans
@@ -351,6 +408,18 @@ declare global {
     // pouvoir mémoriser la dernière largeur "dépliée" et la restaurer telle
     // quelle en rouvrant.
     sidebarLayout: SidebarLayoutState;
+    // Notes épinglées (voir NotesScreen.tsx, section "⭐ Favoris" en tête de
+    // l'explorateur) — relPaths bruts ; un chemin qui ne correspond plus à
+    // rien (renommé/supprimé depuis) est ignoré silencieusement à
+    // l'affichage (findNodeByPath), jamais purgé automatiquement ici.
+    favoriteRelPaths: string[];
+    // Paramètres → Compte et synchronisation : synchronise automatiquement
+    // (au démarrage + à intervalle régulier) plutôt que seulement sur clic
+    // de "Synchroniser maintenant" — voir lib/sync/SyncStatusContext.tsx
+    // pour le déclenchement réel. `false` par défaut : la sync manuelle
+    // reste le comportement historique, ce choix n'est jamais fait à la
+    // place de l'utilisatrice.
+    autoSyncEnabled: boolean;
   }
 
   interface SidebarPanelLayout {

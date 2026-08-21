@@ -43,12 +43,30 @@ export function usePropertyDefinitions() {
     [bridge, runAction],
   );
 
+  // À part de `create`/`remove` (via runAction ci-dessus) : `update` peut
+  // renommer une propriété, ce qui déclenche côté Electron une migration du
+  // frontmatter de toutes les notes concernées (voir properties.ts,
+  // `migrateRenamedPropertyInVault`) — le résumé de cette migration est
+  // renvoyé à l'appelant (PropertiesManagementSection.tsx) pour affichage,
+  // plutôt qu'un simple "OK" silencieux qui masquerait des notes non
+  // migrées (CLAUDE.md, "sauvegarde et gestion des données"). `undefined`
+  // = pas de renommage effectif dans cet appel (ex. changement de type/
+  // options seul), ou bridge absent/erreur.
   const update = useCallback(
-    (id: string, patch: PropertyPatch) => {
-      if (!bridge) return Promise.resolve();
-      return runAction(() => bridge.update(id, patch));
+    async (id: string, patch: PropertyPatch): Promise<PropertyRenameMigrationSummary | undefined> => {
+      if (!bridge) return undefined;
+      setError(null);
+      try {
+        const result = await bridge.update(id, patch);
+        setDefinitions(result.properties);
+        return result.migration;
+      } catch (err) {
+        console.error('[properties] échec :', err);
+        setError(err instanceof Error ? err.message : String(err));
+        return undefined;
+      }
     },
-    [bridge, runAction],
+    [bridge],
   );
 
   const remove = useCallback(

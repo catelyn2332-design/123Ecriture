@@ -130,6 +130,32 @@ export interface PropertyPatch {
   options?: string[];
 }
 
+// Résumé honnête de la migration du frontmatter des notes déclenchée par un
+// RENOMMAGE de propriété (voir properties:update dans properties.ts) —
+// jamais un simple "OK" qui masquerait des notes non migrées (CLAUDE.md,
+// "sauvegarde et gestion des données").
+export interface PropertyRenameMigrationSummary {
+  // Notes dont la clé de frontmatter a été renommée (ancienne → nouvelle)
+  // et réécrites sur disque.
+  migratedCount: number;
+  // Notes qui avaient l'ancienne clé MAIS où la nouvelle portait déjà une
+  // valeur — jamais écrasée, donc jamais touchées.
+  skippedCount: number;
+  // Notes où la lecture/écriture a échoué (fichier verrouillé, permissions,
+  // disparu entre le listage et l'accès...) — migration interrompue pour
+  // CETTE note seulement, jamais pour tout le coffre.
+  errorCount: number;
+}
+
+// Réponse de properties:update — `migration` n'est présent que si CET appel
+// a effectivement renommé la propriété (patch.name différent du nom
+// existant) ; un simple changement de type/d'options n'a rien à migrer côté
+// notes.
+export interface PropertyUpdateResult {
+  properties: PropertyDefinition[];
+  migration?: PropertyRenameMigrationSummary;
+}
+
 export interface OccurrenceEntry {
   id: string;
   word: string;
@@ -190,6 +216,20 @@ export interface Preferences {
   editorCloseBrackets: boolean;
   editorInlineTitle: boolean;
   sidebarLayout: SidebarLayoutState;
+  // Notes épinglées (voir NotesScreen.tsx, section "⭐ Favoris" en tête de
+  // l'explorateur) — relPaths bruts plutôt qu'un registre séparé sous
+  // .123ecriture/ : une préférence app-level comme le reste de ce fichier,
+  // pas du contenu de vault. Un chemin qui ne correspond plus à rien
+  // (renommé/supprimé depuis) est ignoré silencieusement à l'affichage
+  // (voir findNodeByPath côté renderer), jamais purgé automatiquement ici.
+  favoriteRelPaths: string[];
+  // Paramètres → Compte et synchronisation : synchronise automatiquement
+  // (au démarrage + à intervalle régulier) plutôt que seulement sur clic de
+  // "Synchroniser maintenant" — voir apps/mobile/lib/sync/SyncStatusContext.tsx
+  // pour le déclenchement réel. `false` par défaut : la sync manuelle reste
+  // le comportement historique, ce choix n'est jamais fait à la place de
+  // l'utilisatrice.
+  autoSyncEnabled: boolean;
 }
 
 export interface SidebarPanelLayout {
@@ -223,8 +263,11 @@ export interface HashedNote {
 
 // Recherche globale (voir search.ts) — un résultat peut être un dossier ou
 // une pièce jointe (aucun `VaultEntryKind` ne les couvre), d'où ce type
-// élargi plutôt que de réutiliser VaultEntryKind tel quel.
-export type SearchResultKind = VaultEntryKind | 'folder' | 'attachment';
+// élargi plutôt que de réutiliser VaultEntryKind tel quel. 'task'/
+// 'calendar-event' étendent la recherche aux modules Tâches/Calendrier
+// (electron/tasks.ts, electron/calendar.ts) — ni l'un ni l'autre n'a de
+// fichier associé, d'où `relPath` vide ('') pour ces deux kinds.
+export type SearchResultKind = VaultEntryKind | 'folder' | 'attachment' | 'task' | 'calendar-event';
 
 export type SearchMatchType = 'title' | 'content' | 'tag' | 'property';
 
@@ -234,9 +277,35 @@ export interface SearchResult {
   kind: SearchResultKind;
   matchType: SearchMatchType;
   snippet?: string;
+  // Uniquement kind==='task' — de quoi rouvrir la tâche : une tâche n'existe
+  // que dans le contexte de sa LISTE (voir tasklists:switch dans tasks.ts),
+  // donc les deux identifiants sont nécessaires, pas juste `taskId`.
+  taskId?: string;
+  taskListId?: string;
+  // Uniquement kind==='calendar-event' — `eventId` sert de clé de rendu,
+  // `eventDate` (AAAA-MM-JJ) suffit à révéler le bon jour dans le
+  // Calendrier (voir CalendarScreen.tsx, `openDay`).
+  eventId?: string;
+  eventDate?: string;
 }
 
 export interface SearchOptions {
   propertyId?: string;
   propertyValue?: string;
+}
+
+// Vue dédiée aux tags (voir NotesScreen.tsx, bascule Fichiers/Tags à côté
+// du bouton de tri) — un `#mot-clé` peut apparaître dans plusieurs notes,
+// d'où ce regroupement plutôt qu'une simple liste de notes. Construit par
+// vault:list-tags (voir search.ts, qui réutilise déjà TAG_PATTERN/
+// extractTags pour la recherche globale) à la demande, jamais tenu à jour
+// en tâche de fond.
+export interface TagNoteRef {
+  relPath: string;
+  name: string;
+}
+
+export interface TagGroup {
+  tag: string;
+  notes: TagNoteRef[];
 }

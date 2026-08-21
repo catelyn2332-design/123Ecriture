@@ -13,10 +13,19 @@ import { EditorView, type ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { parseFrontmatter, serializeFrontmatter } from '../lib/frontmatter';
 import type { FormattingResult, Selection } from '../lib/mdxFormatting';
 import { NOTES_TOOLBAR_ACTIONS, type ToolbarAction } from '../lib/notesToolbarActions';
+import { openSearchResult } from '../lib/searchResults';
 import { useResizablePanel } from '../lib/useResizablePanel';
-import { findNodeByPath, flattenNotes, getAncestorRelPaths, getChildrenAt, getParentRelPath } from '../lib/vaultTree';
+import {
+  findNodeByPath,
+  flattenNotes,
+  flattenVisibleNotes,
+  getAncestorRelPaths,
+  getChildrenAt,
+  getParentRelPath,
+} from '../lib/vaultTree';
 import { useVaults } from '../lib/sync/VaultsContext';
 import { usePreferences } from '../preferences/PreferencesContext';
+import type { NotesActions } from './AppShell';
 import { CanvasEditor } from './CanvasEditor';
 import { ChartEditor } from './ChartEditor';
 import { EditorToolbar } from './EditorToolbar';
@@ -31,7 +40,7 @@ import { PropertiesPanel } from './PropertiesPanel';
 import { ResizeHandle } from './ResizeHandle';
 import { RightSidebar, type SidebarTab } from './RightSidebar';
 import { SearchDialog } from './SearchDialog';
-import { VaultTreeView } from './VaultTreeView';
+import { NOTE_ICON_BY_KIND, VaultTreeView } from './VaultTreeView';
 
 // Trois modes d'affichage d'une note — "Source" (CodeMirror nu, texte brut,
 // façon éditeur de code), "Intermédiaire" (même éditeur CodeMirror + le
@@ -72,12 +81,16 @@ type ViewMode = 'source' | 'split' | 'reading';
 // //3. Fichier ouvert par défaut au démarrage (Paramètres → "Fichier
 //      ouvert par défaut") + révélation automatique dans l'explorateur
 //      (déplier les dossiers ancêtres, faire défiler jusqu'à la ligne).
-// //4. Renommer/déplacer/modifier le chemin/supprimer.
+// //4. Renommer/déplacer/dupliquer/modifier le chemin/supprimer.
 // //5. Menu contextuel de l'explorateur (clic droit) + bouton d'ordre de
 //      tri.
 // //6. Glisser-déposer — réordonner entre frères OU déplacer dans un
 //      dossier, bascule automatique vers le tri "Manuel".
 // //7. Sauvegarde (autosave débouncée) + rendu (liste + éditeur actif).
+// //8. Favoris — section fixe "⭐ Favoris" en tête de l'explorateur.
+// //9. Multi-sélection — Ctrl/Cmd+clic, Shift+clic, barre d'actions
+//      groupées (déplacer/supprimer plusieurs éléments à la fois).
+// //10. Vue Tags — bascule Fichiers/Tags de l'explorateur.
 // Voir aussi apps/desktop/electron/vault.ts (backend fichiers),
 // VaultTreeView.tsx (rendu de l'explorateur), FilesLinksSection.tsx
 // (réglages).
@@ -100,10 +113,30 @@ type Props = {
   // passer par un autre écran redéclencherait l'ouverture en boucle).
   pendingOpenRelPath?: string | null;
   onOpenedPendingNote?: () => void;
+  // Ouvrir un résultat de recherche globale "tâche"/"évènement" (voir
+  // SearchDialog ci-dessous) bascule sur un AUTRE écran — cet écran ne sait
+  // ouvrir que des notes, donc il remonte la demande à App.tsx via ces deux
+  // callbacks (même généralisation que `onRequestOpenNote` de
+  // CalendarScreen.tsx, voir lib/searchResults.ts `openSearchResult`).
+  onRequestOpenTask?: (taskListId: string, taskId: string) => void;
+  onRequestOpenCalendarDate?: (date: string) => void;
+  // Enregistre "Nouvelle note"/"Nouveau dossier" auprès de App.tsx pour que
+  // CommandPalette.tsx (Ctrl/Cmd+K, monté dans AppShell.tsx — donc HORS de
+  // cet écran) puisse les déclencher quand Notes est l'écran actif. Solution
+  // la plus simple qui reste correcte : un registre à UNE entrée (pas un
+  // registre générique par écran), puisque seul Notes expose ce genre
+  // d'action pour l'instant.
+  onRegisterActions?: (actions: NotesActions) => void;
 };
 
-export function NotesScreen({ pendingOpenRelPath, onOpenedPendingNote }: Props = {}) {
-  const { preferences, preferencesLoaded, theme, setFileSortMode } = usePreferences();
+export function NotesScreen({
+  pendingOpenRelPath,
+  onOpenedPendingNote,
+  onRequestOpenTask,
+  onRequestOpenCalendarDate,
+  onRegisterActions,
+}: Props = {}) {
+  const { preferences, preferencesLoaded, theme, setFileSortMode, toggleFavorite } = usePreferences();
   const vault = typeof window !== 'undefined' ? window.vault : undefined;
   const contextMenuBridge = typeof window !== 'undefined' ? window.contextMenu : undefined;
   const { activeVaultPath: vaultPath } = useVaults();
@@ -121,6 +154,22 @@ export function NotesScreen({ pendingOpenRelPath, onOpenedPendingNote }: Props =
   const [movingNode, setMovingNode] = useState<VaultTreeNode | null>(null);
   const [editingPathNode, setEditingPathNode] = useState<VaultTreeNode | null>(null);
   const [editPathError, setEditPathError] = useState<string | null>(null);
+  // Multi-sélection (voir //9 plus bas, `handleRowPress`) — `lastClickedRelPath`
+  // sert d'ancre pour Shift+clic (étendre depuis LE DERNIER élément cliqué,
+  // pas depuis le début de la sélection). `bulkMoveOpen` réutilise
+  // MoveDialog en mode multi (voir `multiCount`) plutôt que de dupliquer une
+  // boîte de dialogue de choix de dossier.
+  const [selectedRelPaths, setSelectedRelPaths] = useState<Set<string>>(new Set());
+  const [lastClickedRelPath, setLastClickedRelPath] = useState<string | null>(null);
+  const [bulkMoveOpen, setBulkMoveOpen] = useState(false);
+  // Bascule Fichiers/Tags de l'explorateur (voir //10 plus bas) — état
+  // purement local (pas de préférence à persister, contrairement au mode de
+  // tri), la liste de tags n'est chargée qu'À LA DEMANDE, au moment où on
+  // bascule dessus.
+  const [explorerViewMode, setExplorerViewMode] = useState<'files' | 'tags'>('files');
+  const [tagGroups, setTagGroups] = useState<TagGroup[]>([]);
+  const [tagsLoading, setTagsLoading] = useState(false);
+  const [expandedTags, setExpandedTags] = useState<Set<string>>(new Set());
   // Barre latérale droite (Propriétés/Occurrences, voir RightSidebar.tsx) —
   // repliée par défaut, un seul état partagé pour tous les types de fichier
   // (markdown/canvas/chart) plutôt qu'un état par kind, puisqu'elle vit à
@@ -192,6 +241,19 @@ export function NotesScreen({ pendingOpenRelPath, onOpenedPendingNote }: Props =
     .filter((item) => item.visible)
     .map((item) => NOTES_TOOLBAR_ACTIONS.find((action) => action.id === item.id))
     .filter((action): action is ToolbarAction => Boolean(action));
+
+  // Raccourcis clavier de mise en forme (voir MdxEditor.tsx, prop
+  // `shortcuts`) — dérivés de TOUTES les actions connues, pas seulement
+  // `toolbarActions` (visibles) : masquer un bouton dans Paramètres est une
+  // préférence d'affichage, pas une désactivation de la fonctionnalité —
+  // le raccourci clavier continue de fonctionner même bouton masqué.
+  const noteShortcuts = useMemo(
+    () =>
+      NOTES_TOOLBAR_ACTIONS.filter((action): action is ToolbarAction & { shortcut: string } =>
+        Boolean(action.shortcut),
+      ).map((action) => ({ key: action.shortcut, run: action.run })),
+    [],
+  );
 
   // //1. 🌳 CHARGEMENT DE L'ARBORESCENCE
   // //////////////////////////////////////////////////////////////////////
@@ -492,6 +554,19 @@ export function NotesScreen({ pendingOpenRelPath, onOpenedPendingNote }: Props =
     [vault, refreshTree],
   );
 
+  // Enregistre "Nouvelle note"/"Nouveau dossier" pour CommandPalette.tsx
+  // (voir Props.onRegisterActions ci-dessus) — sans argument explicite : la
+  // palette de commandes déclenche toujours la création "générique" (même
+  // résolution d'emplacement par défaut que le bouton "+ Nouvelle note" de
+  // l'en-tête), jamais "...ici" (qui n'a de sens que depuis le menu
+  // contextuel d'un élément précis de l'arborescence).
+  useEffect(() => {
+    onRegisterActions?.({
+      createNote: () => void handleCreateNote(),
+      createFolder: () => void handleCreateFolder(),
+    });
+  }, [onRegisterActions, handleCreateNote, handleCreateFolder]);
+
   // //4. ✏️ RENOMMER / DÉPLACER / MODIFIER LE CHEMIN / SUPPRIMER
   // //////////////////////////////////////////////////////////////////////
 
@@ -609,6 +684,26 @@ export function NotesScreen({ pendingOpenRelPath, onOpenedPendingNote }: Props =
     [vault, refreshTree],
   );
 
+  // "Dupliquer" (menu contextuel) — copie DANS LE MÊME dossier (voir
+  // vault:duplicate, apps/desktop/electron/vault.ts, qui gère déjà le
+  // suffixe " (copie)"/" (copie 2)"...), puis ouvre directement la copie :
+  // même geste qu'après une création (`handleCreateNote` ci-dessus), pour
+  // qu'on puisse enchaîner immédiatement dessus sans revenir cliquer dans
+  // l'arborescence.
+  const handleDuplicateNode = useCallback(
+    async (node: VaultTreeNode) => {
+      if (!vault) return;
+      try {
+        const entry = await vault.duplicate(node.relPath);
+        await refreshTree();
+        await openNote({ type: 'note', ...entry });
+      } catch (error) {
+        console.error('[vault] échec de la duplication :', error);
+      }
+    },
+    [vault, refreshTree, openNote],
+  );
+
   const startEditPath = useCallback((node: VaultTreeNode) => {
     setEditPathError(null);
     setEditingPathNode(node);
@@ -713,6 +808,13 @@ export function NotesScreen({ pendingOpenRelPath, onOpenedPendingNote }: Props =
               { id: 'rename', label: 'Renommer' },
               { id: 'move', label: 'Déplacer vers…' },
               { id: 'edit-path', label: 'Modifier le chemin' },
+              { id: 'duplicate', label: 'Dupliquer' },
+              {
+                id: 'toggle-favorite',
+                label: preferences.favoriteRelPaths.includes(node.relPath)
+                  ? 'Retirer des favoris'
+                  : 'Ajouter aux favoris',
+              },
               { id: 'delete', label: 'Supprimer' },
             ];
 
@@ -730,10 +832,23 @@ export function NotesScreen({ pendingOpenRelPath, onOpenedPendingNote }: Props =
         if (node && choice === 'rename') startRename(node);
         if (node && choice === 'move') startMove(node);
         if (node && choice === 'edit-path') startEditPath(node);
+        if (node && choice === 'duplicate') void handleDuplicateNode(node);
+        if (node && choice === 'toggle-favorite') void toggleFavorite(node.relPath);
         if (node && choice === 'delete') void handleDeleteNode(node);
       });
     },
-    [contextMenuBridge, handleCreateNote, handleCreateFolder, startRename, startMove, startEditPath, handleDeleteNode],
+    [
+      contextMenuBridge,
+      handleCreateNote,
+      handleCreateFolder,
+      startRename,
+      startMove,
+      startEditPath,
+      handleDuplicateNode,
+      toggleFavorite,
+      preferences.favoriteRelPaths,
+      handleDeleteNode,
+    ],
   );
 
   // Un seul écouteur "contextmenu" délégué sur tout le conteneur de la
@@ -1103,6 +1218,186 @@ export function NotesScreen({ pendingOpenRelPath, onOpenedPendingNote }: Props =
     }
   }, [vault, activeNote, content, scheduleSave]);
 
+  // //8. ⭐ FAVORIS
+  // //////////////////////////////////////////////////////////////////////
+
+  // Résout chaque relPath favori (préférence app-level, voir
+  // PreferencesContext.tsx) en son nœud RÉEL dans l'arbre courant — un
+  // chemin qui ne correspond plus à rien (note renommée/déplacée/supprimée
+  // depuis qu'elle a été mise en favori) est ignoré silencieusement plutôt
+  // que de planter ou d'afficher une ligne fantôme.
+  const favoriteNotes = useMemo(() => {
+    const notes: VaultNoteNode[] = [];
+    for (const relPath of preferences.favoriteRelPaths) {
+      const found = findNodeByPath(tree, relPath);
+      if (found && found.type === 'note') notes.push(found);
+    }
+    return notes;
+  }, [preferences.favoriteRelPaths, tree]);
+
+  // //9. 🖱️ MULTI-SÉLECTION
+  // //////////////////////////////////////////////////////////////////////
+
+  // Reçoit tous les clics sur une ligne NOTE de l'explorateur (voir
+  // VaultTreeView.tsx, prop `onOpenNote`) — les dossiers restent gérés à
+  // part (toggle du repli) et ne passent jamais par ici. Ctrl/Cmd+clic
+  // bascule la ligne dans la sélection SANS ouvrir la note ; Shift+clic
+  // étend la sélection depuis `lastClickedRelPath` (le dernier élément
+  // cliqué, PAS le début de la sélection courante) jusqu'à la ligne
+  // cliquée, dans l'ordre d'affichage APLATI et VISIBLE de l'arbre
+  // (flattenVisibleNotes — dossiers repliés exclus, comme ce que
+  // l'utilisatrice voit réellement à l'écran) ; un clic simple sans
+  // modificateur vide la sélection multiple et ouvre la note normalement
+  // (comportement inchangé pour qui n'utilise jamais la multi-sélection).
+  const handleRowPress = useCallback(
+    (node: VaultNoteNode, modifiers: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) => {
+      if (modifiers.ctrlKey || modifiers.metaKey) {
+        setSelectedRelPaths((prev) => {
+          const next = new Set(prev);
+          if (next.has(node.relPath)) next.delete(node.relPath);
+          else next.add(node.relPath);
+          return next;
+        });
+        setLastClickedRelPath(node.relPath);
+        return;
+      }
+
+      if (modifiers.shiftKey && lastClickedRelPath) {
+        const visible = flattenVisibleNotes(tree, collapsedPaths);
+        const fromIndex = visible.findIndex((n) => n.relPath === lastClickedRelPath);
+        const toIndex = visible.findIndex((n) => n.relPath === node.relPath);
+        if (fromIndex !== -1 && toIndex !== -1) {
+          const [start, end] = fromIndex < toIndex ? [fromIndex, toIndex] : [toIndex, fromIndex];
+          setSelectedRelPaths(new Set(visible.slice(start, end + 1).map((n) => n.relPath)));
+        } else {
+          // L'un des deux repères a disparu de la vue actuelle (dossier
+          // replié entre-temps) — repli sur une sélection d'un seul élément
+          // plutôt que planter ou étendre sur une plage incohérente.
+          setSelectedRelPaths(new Set([node.relPath]));
+        }
+        setLastClickedRelPath(node.relPath);
+        return;
+      }
+
+      setSelectedRelPaths(new Set());
+      setLastClickedRelPath(node.relPath);
+      void openNote(node);
+    },
+    [tree, collapsedPaths, lastClickedRelPath, openNote],
+  );
+
+  // Changer de coffre invalide toute sélection en cours — les relPaths
+  // n'ont plus aucun sens dans le nouveau vault. Réagit à un changement
+  // d'état EXTERNE (coffre actif, voir VaultsContext), pas un état
+  // dérivable pendant le rendu : c'est exactement le rôle d'un effet (même
+  // exception que l'effet de révélation de la note active plus haut).
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSelectedRelPaths(new Set());
+    setLastClickedRelPath(null);
+  }, [vaultPath]);
+
+  // "Déplacer…" de la barre d'actions groupées — MoveDialog en mode multi
+  // (voir sa prop `multiCount`), déplace chaque relPath sélectionné
+  // séquentiellement vers LA MÊME destination choisie (réutilise
+  // `vault.move`, comme `performMove` ci-dessus mais sans son
+  // `refreshTree()` à chaque itération — un seul rafraîchissement à la fin
+  // suffit pour un lot). Même mise à jour de `activeNote` que `performMove`
+  // si l'un des éléments déplacés est (ou contient) la note ouverte.
+  const submitBulkMove = useCallback(
+    async (destinationRelPath?: string) => {
+      if (!vault) return;
+      const relPaths = [...selectedRelPaths];
+      setBulkMoveOpen(false);
+      for (const relPath of relPaths) {
+        try {
+          const result = await vault.move(relPath, destinationRelPath);
+          setActiveNote((current) => {
+            if (!current) return current;
+            if (current.relPath === relPath) {
+              return { ...current, relPath: result.relPath, name: result.name };
+            }
+            if (isPathAffected(current.relPath, relPath)) {
+              setContent('');
+              return null;
+            }
+            return current;
+          });
+        } catch (error) {
+          console.error('[vault] échec du déplacement groupé :', error);
+        }
+      }
+      setSelectedRelPaths(new Set());
+      await refreshTree();
+    },
+    [vault, selectedRelPaths, refreshTree],
+  );
+
+  // "Supprimer" de la barre d'actions groupées — boucle sur `vault.delete`
+  // (même handler que la suppression simple) : CHAQUE élément déclenche
+  // donc sa propre confirmation native (voir vault:delete dans
+  // apps/desktop/electron/vault.ts) — jamais de suppression groupée
+  // silencieuse, au prix d'une boîte de dialogue par fichier plutôt qu'une
+  // seule pour tout le lot (pas de nouvel handler IPC dédié pour ce
+  // scénario, cohérent avec la consigne de réutiliser vault.delete tel
+  // quel). Annuler la confirmation d'UN fichier n'annule pas les suivants.
+  const handleBulkDelete = useCallback(async () => {
+    if (!vault) return;
+    const relPaths = [...selectedRelPaths];
+    for (const relPath of relPaths) {
+      try {
+        const { deleted } = await vault.delete(relPath);
+        if (!deleted) continue; // annulé pour CE fichier précis
+        setActiveNote((current) => {
+          if (!current) return current;
+          if (isPathAffected(current.relPath, relPath)) {
+            setContent('');
+            return null;
+          }
+          return current;
+        });
+      } catch (error) {
+        console.error('[vault] échec de la suppression groupée :', error);
+      }
+    }
+    setSelectedRelPaths(new Set());
+    await refreshTree();
+  }, [vault, selectedRelPaths, refreshTree]);
+
+  // //10. 🏷️ VUE TAGS
+  // //////////////////////////////////////////////////////////////////////
+
+  // Bascule Fichiers ⇄ Tags (bouton à côté du tri ⇅) — charge la liste des
+  // tags À LA DEMANDE, seulement au moment où on bascule VERS la vue Tags
+  // (pas en permanence, pas de flux poussé) : voir vault:list-tags
+  // (apps/desktop/electron/search.ts), qui reparcourt le coffre à chaque
+  // appel comme le reste de la recherche.
+  const toggleExplorerViewMode = useCallback(async () => {
+    if (explorerViewMode === 'tags') {
+      setExplorerViewMode('files');
+      return;
+    }
+    setExplorerViewMode('tags');
+    if (!vault) return;
+    setTagsLoading(true);
+    try {
+      setTagGroups(await vault.listTags());
+    } catch (error) {
+      console.error('[vault] échec du chargement des tags :', error);
+    } finally {
+      setTagsLoading(false);
+    }
+  }, [explorerViewMode, vault]);
+
+  const toggleExpandedTag = useCallback((tag: string) => {
+    setExpandedTags((prev) => {
+      const next = new Set(prev);
+      if (next.has(tag)) next.delete(tag);
+      else next.add(tag);
+      return next;
+    });
+  }, []);
+
   if (!vault) {
     return (
       <View style={styles.centered}>
@@ -1168,36 +1463,136 @@ export function NotesScreen({ pendingOpenRelPath, onOpenedPendingNote }: Props =
             >
               <Text style={{ color: theme.text }}>⇅</Text>
             </Pressable>
+            <Pressable
+              onPress={() => void toggleExplorerViewMode()}
+              style={[
+                styles.searchButton,
+                { borderColor: theme.border },
+                explorerViewMode === 'tags' && { backgroundColor: theme.accent, borderColor: theme.accent },
+              ]}
+              accessibilityLabel={explorerViewMode === 'tags' ? 'Revenir aux fichiers' : 'Voir les tags'}
+            >
+              <Text style={{ color: explorerViewMode === 'tags' ? '#fff' : theme.text }}>🏷️</Text>
+            </Pressable>
           </View>
         </View>
-        <ScrollView>
-          <VaultTreeView
-            nodes={tree}
-            theme={theme}
-            activeRelPath={activeNote?.relPath}
-            collapsedPaths={collapsedPaths}
-            onToggleCollapse={toggleCollapse}
-            onOpenNote={(node) => void openNote(node)}
-            draggingRelPath={draggingRelPath}
-            dragOverInsertion={dragOverInsertion}
-            rename={
-              renamingRelPath
-                ? {
-                    relPath: renamingRelPath,
-                    value: renamingValue,
-                    onChangeValue: setRenamingValue,
-                    onSubmit: () => void submitRename(),
-                    onCancel: cancelRename,
-                  }
-                : null
-            }
-          />
-          {tree.length === 0 && (
-            <Text style={[styles.muted, { color: theme.textMuted, padding: 16 }]}>
-              Aucune note pour l’instant. Clic droit ici pour en créer une.
+
+        {/* Barre d'actions groupées — visible uniquement à partir de 2
+            éléments sélectionnés (voir //9, `handleRowPress`) : 1 seul élément
+            n'a pas besoin d'un bandeau dédié, le menu contextuel classique
+            suffit déjà pour agir dessus seul. */}
+        {selectedRelPaths.size >= 2 && (
+          <View style={[styles.bulkBar, { borderColor: theme.border, backgroundColor: theme.surface }]}>
+            <Text style={[styles.bulkBarText, { color: theme.text }]}>
+              {selectedRelPaths.size} éléments sélectionnés
             </Text>
-          )}
-        </ScrollView>
+            <Pressable onPress={() => setBulkMoveOpen(true)}>
+              <Text style={[styles.bulkBarAction, { color: theme.accent }]}>Déplacer…</Text>
+            </Pressable>
+            <Pressable onPress={() => void handleBulkDelete()}>
+              <Text style={[styles.bulkBarAction, styles.bulkBarDanger]}>Supprimer</Text>
+            </Pressable>
+            <Pressable onPress={() => setSelectedRelPaths(new Set())}>
+              <Text style={[styles.bulkBarAction, { color: theme.textMuted }]}>Annuler</Text>
+            </Pressable>
+          </View>
+        )}
+
+        {/* "⭐ Favoris" — section FIXE en tête d'explorateur (pas dans le
+            ScrollView du dessous) : reste visible même en scrollant une longue
+            arborescence, comme une barre de raccourcis. N'apparaît que s'il y
+            a au moins un favori RÉSOLU (voir favoriteNotes, //8) — jamais un
+            bandeau vide. */}
+        {favoriteNotes.length > 0 && (
+          <View style={[styles.favoritesSection, { borderColor: theme.border }]}>
+            <Text style={[styles.favoritesHeader, { color: theme.textMuted }]}>⭐ Favoris</Text>
+            {favoriteNotes.map((node) => (
+              <Pressable
+                key={node.relPath}
+                onPress={() => void openNote(node)}
+                style={[
+                  styles.favoriteRow,
+                  node.relPath === activeNote?.relPath && { backgroundColor: `${theme.accent}22` },
+                ]}
+              >
+                <Text style={styles.icon}>{NOTE_ICON_BY_KIND[node.kind]}</Text>
+                <Text style={{ color: theme.text }} numberOfLines={1}>
+                  {node.name}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
+
+        {explorerViewMode === 'files' ? (
+          <ScrollView>
+            <VaultTreeView
+              nodes={tree}
+              theme={theme}
+              activeRelPath={activeNote?.relPath}
+              collapsedPaths={collapsedPaths}
+              onToggleCollapse={toggleCollapse}
+              onOpenNote={handleRowPress}
+              selectedRelPaths={selectedRelPaths}
+              draggingRelPath={draggingRelPath}
+              dragOverInsertion={dragOverInsertion}
+              rename={
+                renamingRelPath
+                  ? {
+                      relPath: renamingRelPath,
+                      value: renamingValue,
+                      onChangeValue: setRenamingValue,
+                      onSubmit: () => void submitRename(),
+                      onCancel: cancelRename,
+                    }
+                  : null
+              }
+            />
+            {tree.length === 0 && (
+              <Text style={[styles.muted, { color: theme.textMuted, padding: 16 }]}>
+                Aucune note pour l’instant. Clic droit ici pour en créer une.
+              </Text>
+            )}
+          </ScrollView>
+        ) : (
+          <ScrollView>
+            {tagsLoading && (
+              <Text style={[styles.muted, { color: theme.textMuted, padding: 16 }]}>Chargement des tags…</Text>
+            )}
+            {!tagsLoading && tagGroups.length === 0 && (
+              <Text style={[styles.muted, { color: theme.textMuted, padding: 16 }]}>
+                Aucun mot-clé #tag trouvé dans ce coffre.
+              </Text>
+            )}
+            {!tagsLoading &&
+              tagGroups.map((group) => {
+                const isExpanded = expandedTags.has(group.tag);
+                return (
+                  <View key={group.tag}>
+                    <Pressable onPress={() => toggleExpandedTag(group.tag)} style={styles.tagRow}>
+                      <Text style={styles.icon}>{isExpanded ? '📂' : '📁'}</Text>
+                      <Text style={{ color: theme.text }} numberOfLines={1}>
+                        #{group.tag} ({group.notes.length})
+                      </Text>
+                    </Pressable>
+                    {isExpanded &&
+                      group.notes.map((note) => (
+                        <Pressable
+                          key={note.relPath}
+                          onPress={() => openNoteByRelPath(note.relPath)}
+                          style={styles.tagNoteRow}
+                        >
+                          <Text style={styles.icon}>📝</Text>
+                          <Text style={{ color: theme.text }} numberOfLines={1}>
+                            {note.name}
+                          </Text>
+                        </Pressable>
+                      ))}
+                  </View>
+                );
+              })}
+          </ScrollView>
+        )}
       </View>
       <ResizeHandle
         theme={theme}
@@ -1339,23 +1734,11 @@ export function NotesScreen({ pendingOpenRelPath, onOpenedPendingNote }: Props =
 
                     {viewMode !== 'reading' && (
                       <EditorToolbar
-                        items={toolbarActions.map((action) =>
-                          action.subActions
-                            ? {
-                                id: action.id,
-                                label: action.label,
-                                subItems: action.subActions.map((sub) => ({
-                                  id: sub.id,
-                                  label: sub.label,
-                                  onPress: () => applyFormatting(sub.run),
-                                })),
-                              }
-                            : {
-                                id: action.id,
-                                label: action.label,
-                                onPress: () => applyFormatting(action.run as NonNullable<typeof action.run>),
-                              },
-                        )}
+                        items={toolbarActions.map((action) => ({
+                          id: action.id,
+                          label: action.label,
+                          onPress: () => applyFormatting(action.run),
+                        }))}
                         theme={theme}
                       />
                     )}
@@ -1396,6 +1779,7 @@ export function NotesScreen({ pendingOpenRelPath, onOpenedPendingNote }: Props =
                           fontSize={preferences.editorFontSize}
                           fontFamily={preferences.editorFontFamily}
                           closeBrackets={preferences.editorCloseBrackets}
+                          shortcuts={noteShortcuts}
                           onReady={(ref: ReactCodeMirrorRef) => {
                             viewRef.current = ref.view ?? null;
                           }}
@@ -1453,12 +1837,20 @@ export function NotesScreen({ pendingOpenRelPath, onOpenedPendingNote }: Props =
         )}
       </View>
 
+      {/* Un seul MoveDialog pour les deux usages — "Déplacer vers…" sur UN
+          élément (movingNode) et "Déplacer…" groupé sur la multi-sélection
+          (bulkMoveOpen, voir //9) : les deux ne peuvent jamais être actifs en
+          même temps (rien dans l'UI ne permet d'ouvrir l'un pendant que
+          l'autre est déjà ouvert), donc dispatcher `onSelect`/`onCancel`
+          selon lequel des deux est actif suffit, pas besoin de deux Modal
+          montés. */}
       <MoveDialog
         node={movingNode}
+        multiCount={bulkMoveOpen ? selectedRelPaths.size : undefined}
         tree={tree}
         theme={theme}
-        onSelect={(destination) => void submitMove(destination)}
-        onCancel={cancelMove}
+        onSelect={(destination) => (bulkMoveOpen ? void submitBulkMove(destination) : void submitMove(destination))}
+        onCancel={() => (bulkMoveOpen ? setBulkMoveOpen(false) : cancelMove())}
       />
 
       <EditPathDialog
@@ -1473,9 +1865,19 @@ export function NotesScreen({ pendingOpenRelPath, onOpenedPendingNote }: Props =
       {searchOpen && (
         <SearchDialog
           theme={theme}
-          onOpenResult={(relPath) => {
+          onOpenResult={(result) => {
             setSearchOpen(false);
-            openNoteByRelPath(relPath);
+            // Note/canvas/graphique/excalidraw : s'ouvre directement ICI
+            // (openNoteByRelPath, pas besoin de repasser par App.tsx
+            // puisqu'on est déjà sur Notes) — tâche/évènement : remontés à
+            // App.tsx via onRequestOpenTask/onRequestOpenCalendarDate, qui
+            // basculent d'écran ET révèlent l'élément (voir Props
+            // ci-dessus).
+            openSearchResult(result, {
+              openNote: openNoteByRelPath,
+              openTask: (taskListId, taskId) => onRequestOpenTask?.(taskListId, taskId),
+              openCalendarEvent: (date) => onRequestOpenCalendarDate?.(date),
+            });
           }}
           onCancel={() => setSearchOpen(false)}
         />
@@ -1545,6 +1947,67 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  // Barre d'actions groupées (multi-sélection, //9) — bandeau compact entre
+  // l'en-tête de l'explorateur et l'arbre, même esprit visuel que
+  // listHeader (bordures/fond du thème).
+  bulkBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+  },
+  bulkBarText: {
+    fontSize: 12,
+    fontWeight: '600',
+    flex: 1,
+  },
+  bulkBarAction: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  bulkBarDanger: {
+    color: '#dc2626',
+  },
+  // "⭐ Favoris" (//8) — section fixe en tête de l'explorateur.
+  favoritesSection: {
+    borderBottomWidth: 1,
+    paddingVertical: 4,
+  },
+  favoritesHeader: {
+    fontSize: 11,
+    fontWeight: '700',
+    paddingHorizontal: 12,
+    paddingTop: 6,
+    paddingBottom: 2,
+  },
+  favoriteRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+  },
+  // Vue Tags (//10) — un tag dépliable, ses notes indentées dessous.
+  tagRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+  tagNoteRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 6,
+    paddingLeft: 28,
+    paddingRight: 12,
+  },
+  icon: {
+    fontSize: 14,
   },
   editor: {
     flex: 1,

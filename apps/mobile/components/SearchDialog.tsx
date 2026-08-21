@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
+import { isSearchResultOpenable, SEARCH_MATCH_LABEL, SEARCH_RESULT_ICON, searchResultKey } from '../lib/searchResults';
 import type { Theme } from '../theme';
 
 // Recherche globale — voir .claude/References/Sources.md §2 : "un petit
@@ -16,25 +17,15 @@ import type { Theme } from '../theme';
 // n'est que l'UI, il ne parcourt jamais le coffre lui-même.
 const SEARCH_DEBOUNCE_MS = 300;
 
-const RESULT_ICON: Record<SearchResultKind, string> = {
-  markdown: '📝',
-  canvas: '🎨',
-  chart: '📊',
-  excalidraw: '🖍️',
-  folder: '📁',
-  attachment: '📎',
-};
-
-const MATCH_LABEL: Record<SearchMatchType, string> = {
-  title: 'titre',
-  content: 'contenu',
-  tag: 'mot-clé',
-  property: 'propriété',
-};
-
 type Props = {
   theme: Theme;
-  onOpenResult: (relPath: string) => void;
+  // Résultat complet (pas juste `relPath`) : depuis la refonte "recherche
+  // étendue aux tâches/évènements" (voir lib/searchResults.ts), ouvrir un
+  // résultat peut vouloir dire "basculer sur un autre écran", pas seulement
+  // "ouvrir cette note" — c'est à l'appelant de décider via
+  // `openSearchResult` (NotesScreen.tsx pour ce composant, CommandPalette.tsx
+  // pour l'autre consommateur).
+  onOpenResult: (result: SearchResult) => void;
   onCancel: () => void;
 };
 
@@ -163,24 +154,14 @@ export function SearchDialog({ theme, onOpenResult, onCancel }: Props) {
             {!loading &&
               hasQuery &&
               results.map((result) => {
-                // Seuls markdown/canvas/graphique s'ouvrent réellement dans
-                // Notes (openNoteByRelPath) — dossiers et pièces jointes
-                // n'ont pas d'éditeur dédié aujourd'hui, la ligne reste donc
-                // informative plutôt que de prétendre à un clic qui ne
-                // ferait rien (règle CLAUDE.md : un bouton doit faire ce
-                // qu'il annonce).
-                const isOpenable =
-                  result.kind === 'markdown' ||
-                  result.kind === 'canvas' ||
-                  result.kind === 'chart' ||
-                  result.kind === 'excalidraw';
+                const isOpenable = isSearchResultOpenable(result.kind);
                 return (
                   <Pressable
-                    key={result.relPath}
-                    onPress={isOpenable ? () => onOpenResult(result.relPath) : undefined}
+                    key={searchResultKey(result)}
+                    onPress={isOpenable ? () => onOpenResult(result) : undefined}
                     style={[styles.result, { borderColor: theme.border }, !isOpenable && styles.resultDisabled]}
                   >
-                    <Text style={styles.resultIcon}>{RESULT_ICON[result.kind]}</Text>
+                    <Text style={styles.resultIcon}>{SEARCH_RESULT_ICON[result.kind]}</Text>
                     <View style={styles.resultBody}>
                       <Text style={{ color: theme.text }} numberOfLines={1}>
                         {result.name}
@@ -191,7 +172,9 @@ export function SearchDialog({ theme, onOpenResult, onCancel }: Props) {
                         </Text>
                       )}
                     </View>
-                    <Text style={[styles.matchType, { color: theme.textMuted }]}>{MATCH_LABEL[result.matchType]}</Text>
+                    <Text style={[styles.matchType, { color: theme.textMuted }]}>
+                      {SEARCH_MATCH_LABEL[result.matchType]}
+                    </Text>
                   </Pressable>
                 );
               })}

@@ -25,7 +25,7 @@ type GetWindow = () => BrowserWindow | null;
 // //6. Handlers IPC — Lecture (list-tree, read-note, pièces jointes,
 //      dernier fichier ouvert).
 // //7. Handlers IPC — Création/écriture (write-note, create-note/-folder,
-//      note journalière, import de pièce jointe).
+//      duplication, note journalière, import de pièce jointe).
 // //8. Handlers IPC — Organisation (reorder, rename, move, set-path,
 //      delete).
 // Voir aussi apps/mobile/components/VaultTreeView.tsx (rendu de
@@ -391,6 +391,47 @@ export function registerVaultHandlers(getWindow: GetWindow): void {
       };
     },
   );
+
+  // Duplique une note/canvas/graphique/excalidraw existant dans SON PROPRE
+  // dossier — utile pour partir d'un gabarit sans repartir de zéro (voir
+  // NotesScreen.tsx, menu contextuel "Dupliquer"). Suffixe explicite
+  // " (copie)", puis " (copie 2)"... en cas de collision, plutôt que
+  // `findAvailableName` telle quelle (qui suffixerait juste " 2", " 3"...) :
+  // une copie doit rester identifiable comme telle, pas ressembler à une
+  // note distincte du même nom numéroté.
+  ipcMain.handle('vault:duplicate', async (_event, relPath: string) => {
+    const vaultPath = getVaultPath();
+    if (!vaultPath) throw new Error('Aucun vault sélectionné');
+
+    const sourceFull = resolveInVault(vaultPath, relPath);
+    if (!fsSync.existsSync(sourceFull) || !fsSync.statSync(sourceFull).isFile()) {
+      throw new Error('Élément introuvable.');
+    }
+
+    const extension = path.extname(sourceFull);
+    const baseName = path.basename(sourceFull, extension);
+    const dir = path.dirname(sourceFull);
+    const kind: VaultEntryKind = EXTENSION_TO_KIND[extension] ?? 'markdown';
+
+    let candidateName = `${baseName} (copie)`;
+    let counter = 2;
+    while (fsSync.existsSync(path.join(dir, `${candidateName}${extension}`))) {
+      candidateName = `${baseName} (copie ${counter})`;
+      counter += 1;
+    }
+
+    const content = await fs.readFile(sourceFull, 'utf8');
+    const destFull = path.join(dir, `${candidateName}${extension}`);
+    await fs.writeFile(destFull, content, 'utf8');
+    const stat = await fs.stat(destFull);
+
+    return {
+      relPath: path.relative(vaultPath, destFull),
+      name: candidateName,
+      modifiedAt: stat.mtimeMs,
+      kind,
+    };
+  });
 
   ipcMain.handle('vault:create-folder', async (_event, name: string, parentRelPath: string | undefined) => {
     const vaultPath = getVaultPath();

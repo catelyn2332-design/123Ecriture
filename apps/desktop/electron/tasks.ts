@@ -60,7 +60,12 @@ function normalizeTask(task: Task): Task {
   };
 }
 
-function readTasks(vaultPath: string): Task[] {
+// Exportées (pas seulement internes à ce module) pour être réutilisées par
+// search.ts — la recherche globale doit aussi trouver les tâches, sans
+// dupliquer la lecture de tasks.json/tasklists.json (même process Electron,
+// pas la même justification que la duplication frontmatter.ts/search.ts,
+// qui elle traverse la frontière renderer/main).
+export function readTasks(vaultPath: string): Task[] {
   try {
     const raw = JSON.parse(fsSync.readFileSync(getTasksFilePath(vaultPath), 'utf8')) as Task[];
     return raw.map(normalizeTask);
@@ -122,7 +127,12 @@ function migrateTaskLists(vaultPath: string): TaskListsData {
   return data;
 }
 
-function getTaskLists(vaultPath: string): TaskList[] {
+// Exportée pour search.ts, même raison que readTasks ci-dessus — appelée
+// avant readTasks pour garantir la migration paresseuse (attribution d'un
+// listId à toute tâche créée avant les listes multiples) : sans ça, une
+// tâche pourrait remonter dans les résultats de recherche sans identifiant
+// de liste exploitable pour la rouvrir.
+export function getTaskLists(vaultPath: string): TaskList[] {
   return migrateTaskLists(vaultPath).lists;
 }
 

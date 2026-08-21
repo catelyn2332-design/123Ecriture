@@ -404,6 +404,26 @@ totalement la plateforme sur laquelle ils tournent.
 > `electron/main.ts`/`preload.ts`, exactement comme le web export Expo
 > compile déjà `App.tsx` pour le renderer.
 
+> **Écart pragmatique (v0.1.21, import direct `apps/desktop` →
+> `apps/mobile`)** : `apps/desktop/electron/properties.ts` importe
+> directement `migrateFrontmatterKey` depuis
+> `apps/mobile/lib/frontmatterMigration.ts` (chemin relatif
+> `../../mobile/lib/...`), au lieu de dupliquer sa propre copie comme le
+> font `search.ts`/`occurrences.ts` pour leur mini-parseur de frontmatter en
+> LECTURE seule (voir leurs commentaires sur cette duplication assumée).
+> Différence de nature qui justifie l'exception : cette fonction RÉÉCRIT des
+> notes existantes sur disque (migration de clé au renommage d'une
+> propriété, §8) — une zone "sauvegarde et gestion des données" où une
+> deuxième implémentation divergente serait plus dangereuse qu'un import
+> cross-package. `migrateFrontmatterKey` reste pure et testée par Vitest
+> côté `apps/mobile` (aucun équivalent Electron-only). Vérifié compatible
+> avec la résolution de modules pnpm et le bundling esbuild
+> (`build:electron` bundle bien le code + ses propres dépendances, résolues
+> depuis `apps/mobile/node_modules` relativement au fichier importé) — mais
+> reste un cas isolé, pas un changement de politique : ne pas généraliser
+> les imports cross-package tant qu'un vrai `packages/` partagé (§3) n'a pas
+> de raison d'exister pour autre chose.
+
 //////////////////////////////////////////////////////////////////////////
 // 6. ☁️ SYNCHRONISATION PAR COMPTE (SUPABASE)
 //////////////////////////////////////////////////////////////////////////

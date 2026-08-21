@@ -2,6 +2,7 @@ import { Alert } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import { StorageAccessFramework } from 'expo-file-system/legacy';
 
+import { parseFrontmatter } from '../frontmatter';
 import { getActiveVaultRootUri } from './nativeVaultsAdapter';
 
 // Implémentation native (Android) de VaultBridge, sur le Storage Access
@@ -180,6 +181,14 @@ const MIME_FOR_KIND: Record<VaultEntryKind, string> = {
   chart: 'application/json',
   excalidraw: 'application/json',
 };
+
+// Même règle de limite de mot que TAG_PATTERN dans
+// apps/desktop/electron/search.ts (précédé d'un espace/saut de ligne/
+// tabulation ou début de texte) — reproduite ici plutôt que partagée, même
+// convention de duplication assumée qu'entre ce fichier-là et
+// apps/mobile/lib/markdownPlugins.ts (voir leurs commentaires respectifs) :
+// aucun `packages/` commun aujourd'hui pour la porter une seule fois.
+const TAG_PATTERN = /(^|[\s])#([\p{L}\p{N}_-]+)/gu;
 
 function defaultContentForKind(kind: VaultEntryKind, title: string): string {
   if (kind === 'markdown') return `---\ntitle: ${title}\ncreated: ${new Date().toISOString()}\n---\n\n`;
@@ -434,6 +443,80 @@ export const nativeVaultAdapter: VaultBridge = {
     } finally {
       await FileSystem.deleteAsync(tmpPath, { idempotent: true });
     }
+  },
+
+  // Duplique un FICHIER existant dans SON PROPRE dossier — même limite
+  // fichiers-uniquement que rename()/move() ci-dessus (dupliquer un dossier
+  // demanderait une copie récursive jamais éprouvée sur un vrai appareil).
+  // Suffixe " (copie)"/" (copie 2)"... comme vault:duplicate côté Electron
+  // (apps/desktop/electron/vault.ts) — findAvailableName() ci-dessus
+  // suffixerait juste " 2"/" 3", moins explicite pour identifier une copie.
+  duplicate: async (relPath) => {
+    const { uri, isDirectory } = resolveIndexed(relPath);
+    if (isDirectory) {
+      throw new Error('Dupliquer un dossier n’est pas encore pris en charge sur Android.');
+    }
+    const parentRelPath = relPath.includes('/') ? relPath.slice(0, relPath.lastIndexOf('/')) : '';
+    const parentUri = await resolveParentUri(parentRelPath || undefined);
+    const segment = relPath.includes('/') ? relPath.slice(relPath.lastIndexOf('/') + 1) : relPath;
+    const kind = extensionKind(segment) ?? 'markdown';
+    const ext = EXTENSION_FOR_KIND[kind];
+    const baseName = segment.slice(0, segment.length - ext.length);
+
+    const siblings = siblingNamesOf(parentRelPath);
+    let candidateName = `${baseName} (copie)${ext}`;
+    let counter = 2;
+    while (siblings.has(candidateName)) {
+      candidateName = `${baseName} (copie ${counter})${ext}`;
+      counter += 1;
+    }
+
+    const content = await readSafFileText(uri);
+    const newUri = await StorageAccessFramework.createFileAsync(parentUri, candidateName, MIME_FOR_KIND[kind]);
+    await writeSafFileText(newUri, content);
+    const newRelPath = parentRelPath ? `${parentRelPath}/${candidateName}` : candidateName;
+    pathIndex.set(newRelPath, { uri: newUri, isDirectory: false });
+    return {
+      relPath: newRelPath,
+      name: candidateName.slice(0, candidateName.length - ext.length),
+      modifiedAt: Date.now(),
+      kind,
+    };
+  },
+
+  // Vue dédiée aux tags (voir NotesScreen.tsx, bascule Fichiers/Tags) — même
+  // esprit que vault:list-tags côté Electron (search.ts) : reparcourt le
+  // coffre à la demande (refreshIndex, jamais un index potentiellement
+  // périmé) et extrait les `#tags` du CORPS de chaque note markdown
+  // (frontmatter exclu, via parseFrontmatter), regroupés par tag.
+  listTags: async () => {
+    await refreshIndex();
+    const notesByTag = new Map<string, { relPath: string; name: string }[]>();
+
+    for (const [relPath, entry] of pathIndex) {
+      if (entry.isDirectory || extensionKind(relPath) !== 'markdown') continue;
+      let content: string;
+      try {
+        content = await readSafFileText(entry.uri);
+      } catch {
+        continue; // fichier illisible entre le listage et la lecture — ignoré
+      }
+      const { body } = parseFrontmatter(content);
+      const segment = relPath.includes('/') ? relPath.slice(relPath.lastIndexOf('/') + 1) : relPath;
+      const kind = extensionKind(segment);
+      const name = kind ? segment.slice(0, segment.length - EXTENSION_FOR_KIND[kind].length) : segment;
+
+      for (const match of body.matchAll(TAG_PATTERN)) {
+        const tag = match[2].toLowerCase();
+        const notes = notesByTag.get(tag) ?? [];
+        notes.push({ relPath, name });
+        notesByTag.set(tag, notes);
+      }
+    }
+
+    return [...notesByTag.entries()]
+      .map(([tag, notes]) => ({ tag, notes }))
+      .sort((a, b) => a.tag.localeCompare(b.tag, 'fr'));
   },
 };
 

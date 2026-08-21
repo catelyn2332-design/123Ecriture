@@ -3,7 +3,7 @@ import { useColorScheme } from 'react-native';
 
 import { DEFAULT_CANVAS_TOOLBAR_ORDER } from '../lib/canvasToolbarActions';
 import { DEFAULT_CHART_TOOLBAR_ORDER } from '../lib/chartToolbarActions';
-import { DEFAULT_NOTES_TOOLBAR_ORDER } from '../lib/notesToolbarActions';
+import { DEFAULT_NOTES_TOOLBAR_ORDER, normalizeNotesToolbarOrder } from '../lib/notesToolbarActions';
 import { darkTheme, lightTheme, type Theme } from '../theme';
 
 // Point central de la personnalisation de l'interface (voir
@@ -37,6 +37,10 @@ const DEFAULT_PREFERENCES: Preferences = {
     explorer: { width: 260, collapsed: false },
     rightPanel: { width: 280, collapsed: false },
   },
+  favoriteRelPaths: [],
+  // Sync manuelle par défaut — choix déjà tranché (voir CLAUDE.md), ne
+  // JAMAIS passer à `true` ici.
+  autoSyncEnabled: false,
 };
 
 type PreferencesContextValue = {
@@ -65,6 +69,17 @@ type PreferencesContextValue = {
   setEditorCloseBrackets: (value: boolean) => Promise<void>;
   setEditorInlineTitle: (value: boolean) => Promise<void>;
   setSidebarPanelLayout: (id: SidebarPanelId, layout: SidebarPanelLayout) => Promise<void>;
+  // Notes épinglées (voir NotesScreen.tsx, menu contextuel "Ajouter aux
+  // favoris"/"Retirer des favoris" + section "⭐ Favoris" de l'explorateur) —
+  // bascule l'appartenance de `relPath` à `favoriteRelPaths` en une seule
+  // opération, plutôt que de laisser chaque appelant reconstruire le
+  // tableau à la main (même esprit que les autres setters ci-dessus, qui
+  // persistent directement).
+  toggleFavorite: (relPath: string) => Promise<void>;
+  // Paramètres → Compte et synchronisation, bascule "Synchroniser
+  // automatiquement" — voir lib/sync/SyncStatusContext.tsx pour l'effet qui
+  // la consomme réellement (démarrage + intervalle).
+  setAutoSyncEnabled: (value: boolean) => Promise<void>;
   // Paramètres → Confidentialité et données. `undefined` si non disponible
   // (pas de pont Electron, ex. web/mobile) — laissé à la charge de l'écran
   // d'afficher/masquer les actions correspondantes, même logique de
@@ -98,7 +113,15 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     if (!bridge) return;
     void bridge
       .get()
-      .then((stored) => setPreferences({ ...DEFAULT_PREFERENCES, ...stored }))
+      .then((stored) => {
+        const merged = { ...DEFAULT_PREFERENCES, ...stored };
+        // Voir notesToolbarActions.ts : convertit un ordre enregistré avant
+        // l'éclatement du groupe "H" (id 'heading-group') vers les 6
+        // niveaux individuels, sans quoi ce bouton disparaîtrait de la
+        // barre pour une utilisatrice ayant déjà personnalisé son ordre.
+        merged.notesToolbarOrder = normalizeNotesToolbarOrder(merged.notesToolbarOrder);
+        setPreferences(merged);
+      })
       .catch((error) => console.error('[preferences] échec du chargement :', error))
       .finally(() => setPreferencesLoaded(true));
   }, [bridge]);
@@ -196,6 +219,18 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       persist({ sidebarLayout: { ...preferences.sidebarLayout, [id]: layout } }),
     [persist, preferences.sidebarLayout],
   );
+  const toggleFavorite = useCallback(
+    (relPath: string) => {
+      const current = preferences.favoriteRelPaths;
+      const next = current.includes(relPath)
+        ? current.filter((path) => path !== relPath)
+        : [...current, relPath];
+      return persist({ favoriteRelPaths: next });
+    },
+    [persist, preferences.favoriteRelPaths],
+  );
+
+  const setAutoSyncEnabled = useCallback((value: boolean) => persist({ autoSyncEnabled: value }), [persist]);
 
   const resetPreferences = useCallback(() => {
     setPreferences(DEFAULT_PREFERENCES);
@@ -239,6 +274,8 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       setEditorCloseBrackets,
       setEditorInlineTitle,
       setSidebarPanelLayout,
+      toggleFavorite,
+      setAutoSyncEnabled,
       resetPreferences,
       getConfigPath,
       revealConfigFolder,
@@ -266,6 +303,8 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       setEditorCloseBrackets,
       setEditorInlineTitle,
       setSidebarPanelLayout,
+      toggleFavorite,
+      setAutoSyncEnabled,
       resetPreferences,
       getConfigPath,
       revealConfigFolder,

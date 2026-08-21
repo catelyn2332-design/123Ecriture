@@ -18,7 +18,18 @@ import { DraftTextField } from './DraftTextField';
 // comblés. Une tâche "à plat" (checkbox + texte) reste la vue par défaut ;
 // cliquer son chevron déplie une "fiche" avec le reste, même idée que
 // PropertiesPanel.tsx/OccurrencesPanel.tsx pour les notes.
-export function TasksScreen() {
+type Props = {
+  // Révélation d'une tâche demandée par un AUTRE écran (recherche globale,
+  // palette de commandes — voir App.tsx, `requestOpenTask`) : bascule sur la
+  // liste qui la contient puis déplie sa fiche. Même mécanique que
+  // `pendingOpenRelPath` pour les notes (voir NotesScreen.tsx) —
+  // `onOpenedPendingTask` prévient le parent une fois fait, pour qu'il
+  // remette ce champ à null.
+  pendingOpenTask?: { taskListId: string; taskId: string } | null;
+  onOpenedPendingTask?: () => void;
+};
+
+export function TasksScreen({ pendingOpenTask, onOpenedPendingTask }: Props = {}) {
   const { theme } = usePreferences();
   const vault = typeof window !== 'undefined' ? window.vault : undefined;
   const tasksBridge = typeof window !== 'undefined' ? window.tasks : undefined;
@@ -83,6 +94,31 @@ export function TasksScreen() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vault, vaultPath, activeListId]);
+
+  // Révèle une tâche demandée par un AUTRE écran (voir Props ci-dessus) —
+  // bascule d'abord sur SA liste si ce n'est pas déjà la liste active
+  // (`taskListsBridge.switch`, l'effet ci-dessus rechargera alors `tasks`
+  // via le changement d'`activeListId`), puis déplie sa fiche. Compare à
+  // `activeListId` lu à l'exécution (pas dans les deps) : ce qui compte est
+  // l'état COURANT au moment de la demande, pas de re-déclencher cet effet
+  // à chaque changement de liste par ailleurs.
+  useEffect(() => {
+    if (!pendingOpenTask || !taskListsBridge) return;
+    void (async () => {
+      try {
+        if (pendingOpenTask.taskListId !== activeListId) {
+          setTaskLists(await taskListsBridge.switch(pendingOpenTask.taskListId));
+          setActiveListId(pendingOpenTask.taskListId);
+        }
+        setExpandedTaskId(pendingOpenTask.taskId);
+      } catch (error) {
+        console.error('[tasks] échec de la révélation de la tâche demandée :', error);
+      } finally {
+        onOpenedPendingTask?.();
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingOpenTask, taskListsBridge]);
 
   const handleChooseFolder = async () => {
     if (!vault) return;

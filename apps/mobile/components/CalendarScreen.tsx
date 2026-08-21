@@ -13,9 +13,15 @@ import { usePreferences } from '../preferences/PreferencesContext';
 // (window.vault/window.calendar, comme Notes/Tâches).
 type Props = {
   onRequestOpenNote: (relPath: string) => void;
+  // Révélation d'un jour demandée par un AUTRE écran (recherche globale,
+  // palette de commandes — voir App.tsx, `requestOpenCalendarDate`, résultat
+  // "évènement") : navigue vers le bon mois puis ouvre le panneau du jour.
+  // Même mécanique que `pendingOpenRelPath` pour les notes.
+  pendingOpenDate?: string | null;
+  onOpenedPendingDate?: () => void;
 };
 
-export function CalendarScreen({ onRequestOpenNote }: Props) {
+export function CalendarScreen({ onRequestOpenNote, pendingOpenDate, onOpenedPendingDate }: Props) {
   const { theme } = usePreferences();
   const vault = typeof window !== 'undefined' ? window.vault : undefined;
   const calendarBridge = typeof window !== 'undefined' ? window.calendar : undefined;
@@ -122,6 +128,26 @@ export function CalendarScreen({ onRequestOpenNote }: Props) {
   };
 
   const closeDay = () => setSelectedDate(null);
+
+  // Révèle le jour demandé par un AUTRE écran (voir Props ci-dessus) —
+  // navigue d'abord vers le bon mois (le jour demandé peut être hors du mois
+  // actuellement affiché), puis ouvre son panneau comme un clic normal sur
+  // la cellule (`openDay`).
+  useEffect(() => {
+    if (!pendingOpenDate) return;
+    const [year, month] = pendingOpenDate.split('-').map(Number);
+    if (year && month) {
+      // Réagit à une demande d'ouverture EXTERNE (prop `pendingOpenDate`,
+      // voir App.tsx), pas un état dérivable pendant le rendu — même
+      // exception que NotesScreen.tsx pour sa révélation de note active.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setViewYear(year);
+      setViewMonth(month - 1);
+    }
+    openDay(pendingOpenDate);
+    onOpenedPendingDate?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingOpenDate]);
 
   const handleOpenDailyNote = useCallback(async () => {
     if (!vault || !selectedDate) return;
